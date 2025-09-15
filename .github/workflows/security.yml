@@ -1,59 +1,65 @@
-# .github/workflows/security.yml
-name: Security & SBOM
+name: Build + SBOM + Semgrep
 
 on:
   push:
-    branches: [ main, master ]
+    branches: ['master']
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "0 3 * * 1"   # her pazartesi 06:00 (Europe/Istanbul +03:00)
-
-permissions:
-  contents: read
-  actions: read
-  security-events: write   # (ileride Code Scanning/Grype eklersek lazım)
-  id-token: none
 
 jobs:
-  build-and-sbom:
+  security-pipeline:
     runs-on: ubuntu-latest
-    env:
-      BUILD_CMD: "echo 'no-op build'"
-      
+
+    permissions:
+      contents: read
+      security-events: write   # SARIF için şart
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci
 
       - name: Build
-        run: |
-          set -euo pipefail
-          echo "Running build: $BUILD_CMD"
-          bash -lc "$BUILD_CMD"
+        run: npm run build
 
-      - name: Install Syft (pinned)
+      # --- Syft SBOM ---
+      - name: Install Syft
         run: |
-          set -euo pipefail
           SYFT_VERSION="v1.20.0"
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
             | sh -s -- -b /usr/local/bin "$SYFT_VERSION"
           syft version
 
-      - name: Generate SBOM (SPDX & CycloneDX)
+      - name: Generate SBOM
         run: |
-          set -euo pipefail
           mkdir -p sbom
-          # Kaynak koddan bağımlılık çıkarımı:
           syft dir:. -o spdx-json=sbom/sbom.spdx.json
           syft dir:. -o cyclonedx-json=sbom/sbom.cdx.json
-          # (Opsiyonel) Build çıktısını da tara: ./build, ./dist, ./target vs.
-          if [ -d build ]; then syft dir:build -o cyclonedx-json=sbom/binary.cdx.json; fi
 
-      - name: Upload SBOM Artifacts
+      - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sbom
+          name: sbom-node
           path: sbom/*.json
           retention-days: 30
+
+      # --- Semgrep SAST ---
+      - name: Run Semgrep (autoconfig)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: auto
+          generateSarif: true
+          sarifFile: semgrep.sarif
+
+      - name: Upload Semgrep results to Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
