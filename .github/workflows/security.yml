@@ -2,7 +2,7 @@ name: Build + SBOM + Semgrep
 
 on:
   push:
-    branches: ['master']
+    branches: ['master']   # gerekirse 'main' de ekle
   pull_request:
   workflow_dispatch:
 
@@ -12,23 +12,39 @@ jobs:
 
     permissions:
       contents: read
-      security-events: write   # SARIF için şart
+      security-events: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks/geçmiş istersek lazım olur
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          # lock yoksa cache uyarısı vermesin istiyorsan bu satırı kaldır:
           cache: 'npm'
 
-      - name: Install deps
-        run: npm ci
+      # ---- DEPENDENCY INSTALL (ci varsa ci, yoksa install) ----
+      - name: Install deps (prefer npm ci)
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "package-lock.json found -> npm ci"
+            npm ci
+          else
+            echo "No lock file -> npm install"
+            npm install
+          fi
 
       - name: Build
-        run: npm run build
+        run: |
+          if jq -r '.scripts.build // empty' package.json >/dev/null 2>&1; then
+            npm run build
+          else
+            echo "No build script found, skipping"; exit 0
+          fi
 
       # --- Syft SBOM ---
       - name: Install Syft
@@ -59,21 +75,21 @@ jobs:
           generateSarif: true
           sarifFile: semgrep.sarif
 
-      - name: Upload Semgrep results to Code Scanning
+      - name: Upload Semgrep SARIF
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
 
-      #--- gitleaks---
-
+      # --- Gitleaks ---
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
           args: detect --no-git --redact --report-format sarif --report-path gitleaks.sarif
-        continue-on-error: true   # bulgu olursa pipeline fail etmesin
+        continue-on-error: true
 
       - name: Upload Gitleaks SARIF
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gitleaks.sarif
-      
